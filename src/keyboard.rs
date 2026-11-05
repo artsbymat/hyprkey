@@ -1,6 +1,6 @@
 use evdev::{Device, EventType, Key};
 use smithay_client_toolkit::reexports::calloop::channel::SyncSender;
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
@@ -13,8 +13,8 @@ pub struct Modifiers {
 
 #[derive(Debug)]
 pub struct KeyEvent {
-    pub key: String,
-    pub symbol: String,
+    pub key: &'static str,
+    pub symbol: &'static str,
     pub modifiers: Modifiers,
     pub pressed: bool,
     pub is_modifier: bool,
@@ -28,7 +28,7 @@ pub enum Message {
 
 #[derive(Default)]
 struct KeyboardState {
-    held: HashSet<(usize, u16)>,
+    held: Vec<(usize, u16)>,
     caps_lock: bool,
     // evdev only reports the physical Caps Lock code; whether a press actually
     // enters a lock depends on the compositor's keymap. Hyprland exposes the
@@ -43,10 +43,19 @@ struct KeyboardState {
 
 impl KeyboardState {
     fn event(&mut self, device: usize, key: Key, value: i32) -> Option<KeyEvent> {
+        let code = key.code();
         if value == 0 {
-            self.held.remove(&(device, key.code()));
+            if let Some(pos) = self
+                .held
+                .iter()
+                .position(|&(d, c)| d == device && c == code)
+            {
+                self.held.swap_remove(pos);
+            }
         } else if value == 1 {
-            self.held.insert((device, key.code()));
+            if !self.held.iter().any(|&(d, c)| d == device && c == code) {
+                self.held.push((device, code));
+            }
         } else if value != 2 {
             return None;
         }
@@ -68,9 +77,9 @@ impl KeyboardState {
             }
         }
         let down = |a: Key, b: Key| {
-            self.held
-                .iter()
-                .any(|(_, k)| *k == a.code() || *k == b.code())
+            let ac = a.code();
+            let bc = b.code();
+            self.held.iter().any(|&(_, k)| k == ac || k == bc)
         };
         let modifiers = Modifiers {
             shift: down(Key::KEY_LEFTSHIFT, Key::KEY_RIGHTSHIFT),
@@ -79,11 +88,15 @@ impl KeyboardState {
             meta: down(Key::KEY_LEFTMETA, Key::KEY_RIGHTMETA),
             caps_lock: self.caps_lock,
         };
-        let symbol = if name.len() == 1 && name.as_bytes()[0].is_ascii_lowercase() {
+        let symbol: &'static str = if name.len() == 1 && name.as_bytes()[0].is_ascii_lowercase() {
             if modifiers.shift ^ modifiers.caps_lock {
-                symbol.to_uppercase()
+                const UPPER: [&str; 26] = [
+                    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P",
+                    "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+                ];
+                UPPER[(name.as_bytes()[0] - b'a') as usize]
             } else {
-                symbol.into()
+                symbol
             }
         } else if modifiers.shift {
             match name {
@@ -110,12 +123,11 @@ impl KeyboardState {
                 "\\" => "|",
                 _ => symbol,
             }
-            .into()
         } else {
-            symbol.into()
+            symbol
         };
         Some(KeyEvent {
-            key: name.into(),
+            key: name,
             symbol,
             modifiers,
             pressed: value != 0,
@@ -139,10 +151,47 @@ struct HyprlandKeyboardReport {
     caps_remapped: bool,
 }
 
+#[derive(serde::Deserialize)]
+struct DevicesOutput<'a> {
+    #[serde(borrow)]
+    keyboards: Vec<KeyboardNode<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct KeyboardNode<'a> {
+    #[serde(default)]
+    main: bool,
+    #[serde(rename = "capsLock", default)]
+    caps_lock: bool,
+    #[serde(borrow, default)]
+    options: &'a str,
+}
+
 // Ask Hyprland for the effective lock state and keymap options. Only the main
 // keyboard carries meaningful lock state; the auxiliary nodes Hyprland reports
 // (consumer-control, power-button, ...) must not be consulted.
 fn query_hyprland() -> Option<HyprlandKeyboardReport> {
+    // Fast path: query via Hyprland's UNIX domain socket (zero subprocess forks).
+    if let (Ok(runtime), Ok(instance)) = (
+        std::env::var("XDG_RUNTIME_DIR"),
+        std::env::var("HYPRLAND_INSTANCE_SIGNATURE"),
+    ) {
+        use std::io::{Read, Write};
+        let socket_path = format!("{runtime}/hypr/{instance}/.socket.sock");
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(socket_path) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+            if stream.write_all(b"j/devices").is_ok() {
+                let mut buf = Vec::with_capacity(4096);
+                if stream.read_to_end(&mut buf).is_ok() {
+                    if let Some(report) = parse_devices(&buf) {
+                        return Some(report);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: spawn hyprctl if socket path is unavailable
     let output = std::process::Command::new("hyprctl")
         .args(["-j", "devices"])
         .output()
@@ -154,22 +203,11 @@ fn query_hyprland() -> Option<HyprlandKeyboardReport> {
 }
 
 fn parse_devices(json: &[u8]) -> Option<HyprlandKeyboardReport> {
-    let value: serde_json::Value = serde_json::from_slice(json).ok()?;
-    let keyboards = value.get("keyboards").and_then(|k| k.as_array())?;
-    // Only the keyboard Hyprland marks main carries the shared lock state.
-    // Never fall back to keyboards[0]: Hyprland lists auxiliary nodes first on
-    // many machines (consumer-control, power-button, video-bus, ...) and they
-    // always report capsLock:false, which would silently force lowercase.
-    let main = keyboards
-        .iter()
-        .find(|k| k.get("main").and_then(|m| m.as_bool()) == Some(true))?;
-    let options = main.get("options").and_then(|o| o.as_str()).unwrap_or("");
+    let output: DevicesOutput = serde_json::from_slice(json).ok()?;
+    let main = output.keyboards.into_iter().find(|k| k.main)?;
     Some(HyprlandKeyboardReport {
-        caps_lock: main
-            .get("capsLock")
-            .and_then(|c| c.as_bool())
-            .unwrap_or(false),
-        caps_remapped: has_caps_remap(options),
+        caps_lock: main.caps_lock,
+        caps_remapped: has_caps_remap(main.options),
     })
 }
 
@@ -195,12 +233,15 @@ pub fn start(tx: SyncSender<Message>) {
         if let Some(report) = query_hyprland() {
             state.sync_with_hyprland(&report);
         }
-        // Hyprland is the only authority on the lock state, so it must be
-        // polled even when no input arrives; otherwise a lock set by another
-        // client would leave the HUD showing the old case indefinitely.
-        let poll_tick = Duration::from_millis(500);
+        let fast_poll = Duration::from_millis(50);
+        let normal_poll = Duration::from_millis(1500);
         let mut last_query = Some(std::time::Instant::now());
         loop {
+            let poll_tick = if state.unconfirmed_caps_press {
+                fast_poll
+            } else {
+                normal_poll
+            };
             if last_query.is_none_or(|t| t.elapsed() >= poll_tick) {
                 if let Some(report) = query_hyprland() {
                     state.sync_with_hyprland(&report);
@@ -229,7 +270,7 @@ pub fn start(tx: SyncSender<Message>) {
                     }
                     if let Ok(keys) = device.get_key_state() {
                         for key in keys.iter() {
-                            state.held.insert((next_id, key.code()));
+                            state.held.push((next_id, key.code()));
                         }
                     }
                     if devices.is_empty() {
@@ -267,7 +308,7 @@ pub fn start(tx: SyncSender<Message>) {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
                 Err(_) => {
-                    state.held.retain(|(device, _)| device != id);
+                    state.held.retain(|(device, _)| *device != *id);
                     if let Some(event) = state.event(*id, Key::KEY_LEFTSHIFT, 0) {
                         let _ = tx.send(Message::Key(event));
                     }

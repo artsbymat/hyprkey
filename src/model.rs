@@ -1,6 +1,7 @@
 use crate::keyboard::{Message, Modifiers};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     path::PathBuf,
     time::{Duration, Instant},
@@ -76,13 +77,13 @@ impl Settings {
 
 #[derive(Debug)]
 pub struct HistoryEntry {
-    pub symbol: String,
-    pub label: String,
+    pub symbol: &'static str,
+    pub label: &'static str,
     pub count: u32,
     pub modifiers: Modifiers,
 }
 impl HistoryEntry {
-    pub fn new(symbol: String, label: String, modifiers: Modifiers) -> Self {
+    pub fn new(symbol: &'static str, label: &'static str, modifiers: Modifiers) -> Self {
         Self {
             symbol,
             label,
@@ -90,20 +91,20 @@ impl HistoryEntry {
             modifiers,
         }
     }
-    pub fn caption(&self, show_label: bool) -> String {
+    pub fn caption(&self, show_label: bool) -> Cow<'static, str> {
         let label = if show_label && self.symbol != self.label {
-            self.label.as_str()
+            self.label
         } else {
             ""
         };
         if self.count > 1 {
             if label.is_empty() {
-                format!("×{}", self.count)
+                format!("×{}", self.count).into()
             } else {
-                format!("{label}  ×{}", self.count)
+                format!("{label}  ×{}", self.count).into()
             }
         } else {
-            label.into()
+            Cow::Borrowed(label)
         }
     }
 }
@@ -217,11 +218,8 @@ mod tests {
             ..Settings::default()
         });
         m.keyboards = 1;
-        m.history.push_back(HistoryEntry::new(
-            "a".into(),
-            "a".into(),
-            Modifiers::default(),
-        ));
+        m.history
+            .push_back(HistoryEntry::new("a", "a", Modifiers::default()));
         m.last_press -= Duration::from_secs(7);
         assert!(m.expire());
         assert!(m.history.is_empty());
@@ -239,10 +237,10 @@ mod tests {
 mod repeat_tests {
     use super::*;
     use crate::keyboard::KeyEvent;
-    fn key(symbol: &str, pressed: bool, ctrl: bool) -> Message {
+    fn key(symbol: &'static str, pressed: bool, ctrl: bool) -> Message {
         Message::Key(KeyEvent {
-            key: symbol.into(),
-            symbol: symbol.into(),
+            key: symbol,
+            symbol,
             pressed,
             is_modifier: false,
             modifiers: Modifiers {

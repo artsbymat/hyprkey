@@ -67,19 +67,36 @@ impl Renderer {
             m.settings.font_size as f32 * 0.72
         };
         let caption = entry.caption(latest && m.settings.show_labels);
-        self.text_width(&entry.symbol, size)
+        self.text_width(entry.symbol, size)
             .max(self.text_width(&caption, 12.0))
             .max(24.0)
             + 18.0
     }
+    pub fn capacity_width(&self, m: &Model) -> f32 {
+        let max_k = m.settings.max_keys;
+        let font_size = m.settings.font_size as f32;
+        let char_w = self.text_width("W", font_size);
+        let older_char_w = self.text_width("W", font_size * 0.72);
+        let older_cell = (older_char_w * 2.5).max(24.0) + 18.0;
+        let latest_caption_w = if m.settings.show_labels {
+            self.text_width("Backspace", 12.0)
+        } else {
+            self.text_width("×99", 12.0)
+        };
+        let latest_cell = (char_w * 2.0).max(latest_caption_w).max(24.0) + 18.0;
+        let total = latest_cell + (max_k.saturating_sub(1) as f32) * older_cell;
+        let width = (total.ceil() + 32.0).max(280.0);
+        (width / 2.0).ceil() * 2.0
+    }
     pub fn dimensions(&self, m: &Model) -> (u32, u32) {
-        let total: f32 = m
+        let base_width = self.capacity_width(m);
+        let actual_total: f32 = m
             .history
             .iter()
             .enumerate()
             .map(|(i, entry)| self.cell_width(entry, i + 1 == m.history.len(), m))
             .sum();
-        let width = (total.ceil() + 32.0).max(280.0);
+        let width = ((base_width.max(actual_total.ceil() + 32.0)) / 2.0).ceil() * 2.0;
         let height = if m.show_settings {
             SETTINGS_HEIGHT
         } else {
@@ -101,9 +118,11 @@ impl Renderer {
     ) {
         let px = self.scale(size * canvas.scale);
         let mut x = x * canvas.scale;
+        let scaled = self.font.as_scaled(px);
+        let start_y = (baseline * canvas.scale).round() as i32;
         for ch in text.chars() {
-            let id = self.font.glyph_id(ch);
-            let advance = self.font.as_scaled(px).h_advance(id);
+            let id = scaled.glyph_id(ch);
+            let advance = scaled.h_advance(id);
             let glyph = self
                 .glyphs
                 .entry((ch, (px * 16.0).round() as u16))
@@ -131,16 +150,20 @@ impl Renderer {
                         }
                     }
                 });
-            for (index, alpha) in glyph.coverage.iter().enumerate() {
-                let mut color = color;
-                color[3] = (u16::from(color[3]) * u16::from(*alpha) / 255) as u8;
-                canvas.pixel(
-                    x.round() as i32 + glyph.x + (index % glyph.width) as i32,
-                    (baseline * canvas.scale).round() as i32
-                        + glyph.y
-                        + (index / glyph.width) as i32,
-                    color,
-                );
+            if glyph.width > 0 {
+                let gx = x.round() as i32 + glyph.x;
+                let gy = start_y + glyph.y;
+                for (row, chunk) in glyph.coverage.chunks_exact(glyph.width).enumerate() {
+                    let py = gy + row as i32;
+                    for (col, &alpha) in chunk.iter().enumerate() {
+                        if alpha == 0 {
+                            continue;
+                        }
+                        let mut c = color;
+                        c[3] = (u16::from(color[3]) * u16::from(alpha) / 255) as u8;
+                        canvas.pixel(gx + col as i32, py, c);
+                    }
+                }
             }
             x += advance;
         }
@@ -254,7 +277,7 @@ impl Renderer {
                 let size = m.settings.font_size as f32 * if latest { 1.0 } else { 0.72 };
                 self.centered(
                     &mut c,
-                    &entry.symbol,
+                    entry.symbol,
                     size,
                     x + cell / 2.0,
                     59.0,
@@ -413,9 +436,20 @@ impl Canvas<'_> {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
         }
-        let index = ((y as u32 * self.width + x as u32) * 4) as usize;
-        let dst = u32::from_ne_bytes(self.bytes[index..index + 4].try_into().unwrap());
         let a = u32::from(color[3]);
+        if a == 0 {
+            return;
+        }
+        let index = ((y as u32 * self.width + x as u32) * 4) as usize;
+        if a == 255 {
+            let pixel = (255u32 << 24)
+                | (u32::from(color[0]) << 16)
+                | (u32::from(color[1]) << 8)
+                | u32::from(color[2]);
+            self.bytes[index..index + 4].copy_from_slice(&pixel.to_ne_bytes());
+            return;
+        }
+        let dst = u32::from_ne_bytes(self.bytes[index..index + 4].try_into().unwrap());
         let blend = |src: u8, shift: u32| {
             u32::from(src) * a / 255 + ((dst >> shift) & 255) * (255 - a) / 255
         };
@@ -436,10 +470,16 @@ impl Canvas<'_> {
                 let dy = (y + r - (py as f32 + 0.5))
                     .max((py as f32 + 0.5) - (y + h - r))
                     .max(0.0);
-                let coverage = if r == 0.0 {
+                let coverage = if r == 0.0 || (dx == 0.0 && dy == 0.0) {
                     1.0
+                } else if dx > 0.0 && dy > 0.0 {
+                    let d = dx.hypot(dy);
+                    if d >= r + 0.5 {
+                        continue;
+                    }
+                    (r + 0.5 - d).clamp(0.0, 1.0)
                 } else {
-                    (r + 0.5 - dx.hypot(dy)).clamp(0.0, 1.0)
+                    1.0
                 };
                 let mut c = color;
                 c[3] = (c[3] as f32 * coverage) as u8;
@@ -476,11 +516,9 @@ mod tests {
         });
         model.keyboards = 1;
         for _ in 0..8 {
-            model.history.push_back(HistoryEntry::new(
-                "F12".into(),
-                "F12".into(),
-                Default::default(),
-            ));
+            model
+                .history
+                .push_back(HistoryEntry::new("F12", "F12", Default::default()));
         }
         let (width, height) = renderer.dimensions(&model);
         assert!(width > 360);
@@ -514,7 +552,7 @@ mod tests {
         for (s, l) in [("a", "a"), ("B", "b"), ("F12", "F12"), ("⌫", "Backspace")] {
             model
                 .history
-                .push_back(HistoryEntry::new(s.into(), l.into(), Default::default()));
+                .push_back(HistoryEntry::new(s, l, Default::default()));
         }
         model.history.back_mut().unwrap().count = 12;
         for (name, scale, settings, hud_scale) in [
@@ -548,6 +586,54 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn history_of_eight_keys_has_consistent_hud_dimensions() {
+        let renderer = Renderer::new();
+        let mut model = Model::new(Settings {
+            max_keys: 8,
+            ..Settings::default()
+        });
+        model.keyboards = 1;
+        let initial_dim = renderer.dimensions(&model);
+
+        for i in 0..8 {
+            let (sym, label): (&'static str, &'static str) = match i {
+                0 => ("a", "a"),
+                1 => ("⌫", "Backspace"),
+                2 => ("c", "c"),
+                3 => ("F12", "F12"),
+                4 => ("e", "e"),
+                5 => ("␣", "Space"),
+                6 => ("g", "g"),
+                _ => ("⏎", "Enter"),
+            };
+            model
+                .history
+                .push_back(HistoryEntry::new(sym, label, Default::default()));
+            assert_eq!(
+                renderer.dimensions(&model),
+                initial_dim,
+                "Dimensions fluctuated at key index {i}"
+            );
+        }
+
+        model.history.pop_front();
+        model
+            .history
+            .push_back(HistoryEntry::new("x", "x", Default::default()));
+        assert_eq!(
+            renderer.dimensions(&model),
+            initial_dim,
+            "Dimensions fluctuated when popping/pushing keys"
+        );
+
+        model.history.clear();
+        assert_eq!(
+            renderer.dimensions(&model),
+            initial_dim,
+            "Dimensions changed when history cleared"
+        );
     }
 }
 
@@ -596,7 +682,7 @@ mod scale_tests {
             show_labels: false,
             ..Settings::default()
         });
-        let mut entry = HistoryEntry::new("a".into(), "a".into(), Default::default());
+        let mut entry = HistoryEntry::new("a", "a", Default::default());
         entry.count = 100_000;
         assert_eq!(entry.caption(false), "×100000");
         assert!(
