@@ -7,6 +7,143 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ColorSettings {
+    #[serde(alias = "bg")]
+    pub background: String,
+    #[serde(alias = "fg", alias = "foreground")]
+    pub text: String,
+    pub muted: String,
+    pub active: String,
+    pub inactive: String,
+    pub accent: String,
+    #[serde(alias = "separator")]
+    pub border: String,
+}
+
+impl Default for ColorSettings {
+    fn default() -> Self {
+        Self {
+            background: "#101217f5".to_string(),
+            text: "#eef2fa".to_string(),
+            muted: "#9ba4b7".to_string(),
+            active: "#364c5c".to_string(),
+            inactive: "#202229".to_string(),
+            accent: "#b8e1ff".to_string(),
+            border: "#30333d".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedColors {
+    pub background: [u8; 4],
+    pub text: [u8; 4],
+    pub muted: [u8; 4],
+    pub active: [u8; 4],
+    pub inactive: [u8; 4],
+    pub accent: [u8; 4],
+    pub border: [u8; 4],
+}
+
+impl Default for ResolvedColors {
+    fn default() -> Self {
+        Self {
+            background: [16, 18, 23, 245],
+            text: [238, 242, 250, 255],
+            muted: [155, 164, 183, 255],
+            active: [54, 76, 92, 255],
+            inactive: [32, 34, 41, 255],
+            accent: [184, 225, 255, 255],
+            border: [48, 51, 61, 255],
+        }
+    }
+}
+
+pub fn parse_hex_color(s: &str, default: [u8; 4]) -> [u8; 4] {
+    let s = s.trim();
+    let s = s.strip_prefix('#').unwrap_or(s);
+    match s.len() {
+        6 => {
+            if let Ok(v) = u32::from_str_radix(s, 16) {
+                [
+                    ((v >> 16) & 0xff) as u8,
+                    ((v >> 8) & 0xff) as u8,
+                    (v & 0xff) as u8,
+                    255,
+                ]
+            } else {
+                default
+            }
+        }
+        8 => {
+            if let Ok(v) = u32::from_str_radix(s, 16) {
+                [
+                    ((v >> 24) & 0xff) as u8,
+                    ((v >> 16) & 0xff) as u8,
+                    ((v >> 8) & 0xff) as u8,
+                    (v & 0xff) as u8,
+                ]
+            } else {
+                default
+            }
+        }
+        3 => {
+            let mut buf = [0u8; 6];
+            for (i, b) in s.bytes().enumerate() {
+                buf[i * 2] = b;
+                buf[i * 2 + 1] = b;
+            }
+            if let Ok(s6) = std::str::from_utf8(&buf) {
+                if let Ok(v) = u32::from_str_radix(s6, 16) {
+                    return [
+                        ((v >> 16) & 0xff) as u8,
+                        ((v >> 8) & 0xff) as u8,
+                        (v & 0xff) as u8,
+                        255,
+                    ];
+                }
+            }
+            default
+        }
+        4 => {
+            let mut buf = [0u8; 8];
+            for (i, b) in s.bytes().enumerate() {
+                buf[i * 2] = b;
+                buf[i * 2 + 1] = b;
+            }
+            if let Ok(s8) = std::str::from_utf8(&buf) {
+                if let Ok(v) = u32::from_str_radix(s8, 16) {
+                    return [
+                        ((v >> 24) & 0xff) as u8,
+                        ((v >> 16) & 0xff) as u8,
+                        ((v >> 8) & 0xff) as u8,
+                        (v & 0xff) as u8,
+                    ];
+                }
+            }
+            default
+        }
+        _ => default,
+    }
+}
+
+impl ColorSettings {
+    pub fn resolve(&self) -> ResolvedColors {
+        let def = ResolvedColors::default();
+        ResolvedColors {
+            background: parse_hex_color(&self.background, def.background),
+            text: parse_hex_color(&self.text, def.text),
+            muted: parse_hex_color(&self.muted, def.muted),
+            active: parse_hex_color(&self.active, def.active),
+            inactive: parse_hex_color(&self.inactive, def.inactive),
+            accent: parse_hex_color(&self.accent, def.accent),
+            border: parse_hex_color(&self.border, def.border),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -18,9 +155,14 @@ pub struct Settings {
     pub hud_scale: f32,
     pub x: i32,
     pub y: i32,
+    pub colors: ColorSettings,
+    #[serde(skip)]
+    pub resolved_colors: ResolvedColors,
 }
 impl Default for Settings {
     fn default() -> Self {
+        let colors = ColorSettings::default();
+        let resolved_colors = colors.resolve();
         Self {
             hide_ui: false,
             clear_delay: 2.2,
@@ -30,6 +172,8 @@ impl Default for Settings {
             hud_scale: 1.0,
             x: 100,
             y: 100,
+            colors,
+            resolved_colors,
         }
     }
 }
@@ -49,6 +193,7 @@ impl Settings {
         };
         self.x = self.x.clamp(0, 8192);
         self.y = self.y.clamp(0, 8192);
+        self.resolved_colors = self.colors.resolve();
     }
     fn path() -> Option<PathBuf> {
         std::env::var_os("XDG_CONFIG_HOME")
@@ -290,5 +435,83 @@ mod repeat_tests {
             s.normalize();
             assert_eq!(s.hud_scale, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+
+    #[test]
+    fn color_settings_defaults_match_expected_theme() {
+        let colors = ColorSettings::default().resolve();
+        assert_eq!(colors.background, [16, 18, 23, 245]);
+        assert_eq!(colors.text, [238, 242, 250, 255]);
+        assert_eq!(colors.muted, [155, 164, 183, 255]);
+        assert_eq!(colors.active, [54, 76, 92, 255]);
+        assert_eq!(colors.inactive, [32, 34, 41, 255]);
+        assert_eq!(colors.accent, [184, 225, 255, 255]);
+        assert_eq!(colors.border, [48, 51, 61, 255]);
+    }
+
+    #[test]
+    fn parse_hex_color_supports_rgb_rgba_and_lenient_input() {
+        let fallback = [1, 2, 3, 4];
+        // 6 hex with and without #
+        assert_eq!(
+            parse_hex_color("#3cc3b6", fallback),
+            [0x3c, 0xc3, 0xb6, 255]
+        );
+        assert_eq!(parse_hex_color("3cc3b6", fallback), [0x3c, 0xc3, 0xb6, 255]);
+        assert_eq!(
+            parse_hex_color("  #3CC3B6  ", fallback),
+            [0x3c, 0xc3, 0xb6, 255]
+        );
+
+        // 8 hex with and without #
+        assert_eq!(parse_hex_color("#101217f5", fallback), [16, 18, 23, 245]);
+        assert_eq!(parse_hex_color("101217f5", fallback), [16, 18, 23, 245]);
+
+        // 3 hex #RGB
+        assert_eq!(parse_hex_color("#f0a", fallback), [0xff, 0x00, 0xaa, 255]);
+
+        // 4 hex #RGBA
+        assert_eq!(parse_hex_color("#f0a8", fallback), [0xff, 0x00, 0xaa, 0x88]);
+
+        // Invalid hex falls back to default
+        assert_eq!(parse_hex_color("invalid", fallback), fallback);
+        assert_eq!(parse_hex_color("#12345", fallback), fallback);
+        assert_eq!(parse_hex_color("", fallback), fallback);
+    }
+
+    #[test]
+    fn settings_deserializes_without_colors_and_with_custom_colors() {
+        // Backward compatibility: old settings.json without colors
+        let old_json = r#"{"font_size": 36, "hud_scale": 1.0}"#;
+        let s: Settings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(s.colors, ColorSettings::default());
+        assert_eq!(s.resolved_colors, ResolvedColors::default());
+
+        // Custom colors with aliases
+        let custom_json = r##"{
+            "colors": {
+                "bg": "#081b19f0",
+                "fg": "#ebf9f8",
+                "muted": "#309c91",
+                "active": "#24756d",
+                "inactive": "#0c2724",
+                "accent": "#3cc3b6",
+                "separator": "#184e49"
+            }
+        }"##;
+        let mut s: Settings = serde_json::from_str(custom_json).unwrap();
+        s.normalize();
+        assert_eq!(s.resolved_colors.background, [0x08, 0x1b, 0x19, 0xf0]);
+        assert_eq!(s.resolved_colors.text, [0xeb, 0xf9, 0xf8, 255]);
+        assert_eq!(s.resolved_colors.muted, [0x30, 0x9c, 0x91, 255]);
+        assert_eq!(s.resolved_colors.active, [0x24, 0x75, 0x6d, 255]);
+        assert_eq!(s.resolved_colors.inactive, [0x0c, 0x27, 0x24, 255]);
+        assert_eq!(s.resolved_colors.accent, [0x3c, 0xc3, 0xb6, 255]);
+        assert_eq!(s.resolved_colors.border, [0x18, 0x4e, 0x49, 255]);
     }
 }

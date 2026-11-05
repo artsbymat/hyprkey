@@ -199,9 +199,9 @@ impl Renderer {
             rect,
             7.0,
             if active {
-                [54, 76, 92, 255]
+                c.colors.active
             } else {
-                [32, 34, 41, 255]
+                c.colors.inactive
             },
         );
         self.centered(
@@ -211,9 +211,9 @@ impl Renderer {
             rect[0] + rect[2] / 2.0,
             rect[1] + 20.0,
             if active {
-                [184, 225, 255, 255]
+                c.colors.accent
             } else {
-                [181, 186, 199, 255]
+                c.colors.muted
             },
         );
         hits.push(Hit { rect, action });
@@ -237,20 +237,22 @@ impl Renderer {
             self.glyphs.clear();
             self.raster_scale = raster_scale;
         }
+        let colors = m.settings.resolved_colors;
         let mut c = Canvas {
             bytes,
             width: width * scale,
             height: height * scale,
             scale: raster_scale,
+            colors,
         };
         let width = width as f32 / ui_scale;
         c.rect(
             [0.0, 0.0, width, height as f32 / ui_scale],
             16.0,
-            [16, 18, 23, 245],
+            colors.background,
         );
-        let white = [238, 242, 250, 255];
-        let muted = [155, 164, 183, 255];
+        let white = colors.text;
+        let muted = colors.muted;
         if m.keyboards == 0 {
             self.centered(&mut c, "No keyboard access", 16.0, width / 2.0, 43.0, white);
             self.centered(
@@ -292,7 +294,7 @@ impl Renderer {
                         x + cell / 2.0,
                         82.0,
                         if entry.count > 1 {
-                            [184, 225, 255, 255]
+                            colors.accent
                         } else {
                             muted
                         },
@@ -301,7 +303,7 @@ impl Renderer {
                 x += cell;
             }
         }
-        c.rect([12.0, 94.0, width - 24.0, 1.0], 0.0, [48, 51, 61, 255]);
+        c.rect([12.0, 94.0, width - 24.0, 1.0], 0.0, colors.border);
         let cell = (width - 24.0 - 18.0) / 4.0;
         for (i, (label, active)) in [
             ("⇧", m.modifiers.shift),
@@ -317,9 +319,9 @@ impl Renderer {
                 rect,
                 7.0,
                 if *active {
-                    [54, 76, 92, 255]
+                    colors.active
                 } else {
-                    [32, 34, 41, 255]
+                    colors.inactive
                 },
             );
             self.centered(
@@ -332,7 +334,7 @@ impl Renderer {
             );
         }
         if m.show_settings {
-            c.rect([12.0, 144.0, width - 24.0, 1.0], 0.0, [48, 51, 61, 255]);
+            c.rect([12.0, 144.0, width - 24.0, 1.0], 0.0, colors.border);
             for (row, label, active, action) in [
                 (0, "Hide when idle", m.settings.hide_ui, Action::Hide),
                 (1, "Show labels", m.settings.show_labels, Action::Labels),
@@ -430,6 +432,7 @@ struct Canvas<'a> {
     width: u32,
     height: u32,
     scale: f32,
+    colors: crate::model::ResolvedColors,
 }
 impl Canvas<'_> {
     fn pixel(&mut self, x: i32, y: i32, color: [u8; 4]) {

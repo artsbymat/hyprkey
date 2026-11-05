@@ -51,6 +51,26 @@ cargo build --release --locked
 
 Settings are saved automatically to `~/.config/hyprkey/settings.json`. Right-click on the HUD to adjust settings in real-time.
 
+### Custom Colors
+
+You can fully customize all colors in `~/.config/hyprkey/settings.json`. Supports 6-character hex (`#RRGGBB`) or 8-character hex (`#RRGGBBAA` for transparency):
+
+```json
+{
+  "colors": {
+    "background": "#101217f5",
+    "text": "#eef2fa",
+    "muted": "#9ba4b7",
+    "active": "#364c5c",
+    "inactive": "#202229",
+    "accent": "#b8e1ff",
+    "border": "#30333d"
+  }
+}
+```
+
+*Note: Aliases `bg`, `fg`, and `separator` are also supported.*
+
 ## Development
 
 ```sh
