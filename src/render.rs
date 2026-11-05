@@ -79,7 +79,7 @@ impl Renderer {
             .enumerate()
             .map(|(i, entry)| self.cell_width(entry, i + 1 == m.history.len(), m))
             .sum();
-        let width = (total.ceil() + 32.0).max(360.0);
+        let width = (total.ceil() + 32.0).max(280.0);
         let height = if m.show_settings {
             SETTINGS_HEIGHT
         } else {
@@ -232,7 +232,7 @@ impl Renderer {
             self.centered(&mut c, "No keyboard access", 16.0, width / 2.0, 43.0, white);
             self.centered(
                 &mut c,
-                "Open settings for help",
+                "Right-click for settings",
                 12.0,
                 width / 2.0,
                 69.0,
@@ -279,7 +279,7 @@ impl Renderer {
             }
         }
         c.rect([12.0, 94.0, width - 24.0, 1.0], 0.0, [48, 51, 61, 255]);
-        let cell = (width - 24.0 - 24.0) / 5.0;
+        let cell = (width - 24.0 - 18.0) / 4.0;
         for (i, (label, active)) in [
             ("⇧", m.modifiers.shift),
             ("⌃", m.modifiers.ctrl),
@@ -308,14 +308,6 @@ impl Renderer {
                 if *active { white } else { muted },
             );
         }
-        self.button(
-            &mut c,
-            &mut hits,
-            [12.0 + 4.0 * (cell + 6.0), 103.0, cell, 28.0],
-            "...",
-            m.show_settings,
-            Action::Settings,
-        );
         if m.show_settings {
             c.rect([12.0, 144.0, width - 24.0, 1.0], 0.0, [48, 51, 61, 255]);
             for (row, label, active, action) in [
@@ -500,10 +492,13 @@ mod tests {
             .sum();
         assert!(used + 31.0 <= width as f32);
         let mut bytes = vec![0; (width * height * 4) as usize];
+        renderer.draw(&mut bytes, width, height, 1, &model);
+        assert!(bytes.iter().any(|v| *v != 0));
+        model.show_settings = true;
         assert!(!renderer
             .draw(&mut bytes, width, height, 1, &model)
             .is_empty());
-        assert!(bytes.iter().any(|v| *v != 0));
+        model.show_settings = false;
         model.idle = true;
         assert!(renderer
             .draw(&mut bytes, width, height, 1, &model)

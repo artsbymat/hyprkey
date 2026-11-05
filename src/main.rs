@@ -18,7 +18,10 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
-        pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT},
+        pointer::{
+            CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer,
+            BTN_LEFT, BTN_RIGHT,
+        },
         Capability, SeatHandler, SeatState,
     },
     shell::{
@@ -95,7 +98,9 @@ fn run() -> Result {
         model,
         renderer,
         hits: Vec::new(),
-        pointer: None,
+        themed_pointer: None,
+        current_cursor: None,
+        pointer_position: None,
         relative_manager,
         relative_pointer: None,
         position_dirty: false,
@@ -126,7 +131,7 @@ fn run() -> Result {
         if app.drag.is_none() && app.model.expire() {
             app.dirty = true;
         }
-        app.present(&qh)?;
+        app.present(&conn, &qh)?;
         conn.flush()?;
         let timeout = if app.drag.is_some() {
             if app.position_dirty {
@@ -156,7 +161,9 @@ struct App {
     model: Model,
     renderer: Renderer,
     hits: Vec<Hit>,
-    pointer: Option<wl_pointer::WlPointer>,
+    themed_pointer: Option<ThemedPointer>,
+    current_cursor: Option<CursorIcon>,
+    pointer_position: Option<(f64, f64)>,
     relative_manager: ZwpRelativePointerManagerV1,
     relative_pointer: Option<ZwpRelativePointerV1>,
     drag: Option<Drag>,
@@ -212,7 +219,34 @@ impl App {
             }
         }
     }
-    fn present(&mut self, qh: &QueueHandle<Self>) -> Result {
+    fn desired_cursor(&self, pos: (f64, f64)) -> CursorIcon {
+        if self.drag.is_some() {
+            CursorIcon::Grabbing
+        } else if self
+            .hits
+            .iter()
+            .any(|h| h.contains(pos.0 as f32, pos.1 as f32))
+        {
+            CursorIcon::Pointer
+        } else if pos.1 < 94.0 * self.model.settings.hud_scale as f64 {
+            CursorIcon::Grab
+        } else {
+            CursorIcon::Default
+        }
+    }
+    fn update_cursor(&mut self, conn: &Connection) {
+        if let (Some(themed_pointer), Some(pos)) = (&self.themed_pointer, self.pointer_position) {
+            let cursor = self.desired_cursor(pos);
+            if self.current_cursor != Some(cursor) {
+                if let Err(err) = themed_pointer.set_cursor(conn, cursor) {
+                    eprintln!("hyprkey: set cursor error: {err}");
+                } else {
+                    self.current_cursor = Some(cursor);
+                }
+            }
+        }
+    }
+    fn present(&mut self, conn: &Connection, qh: &QueueHandle<Self>) -> Result {
         if !self.configured {
             return Ok(());
         }
@@ -273,6 +307,7 @@ impl App {
             self.layer.set_size(width, height);
             self.dirty = false;
             commit = true;
+            self.update_cursor(conn);
         }
         if commit {
             self.layer.commit();
@@ -403,19 +438,30 @@ impl SeatHandler for App {
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
     fn new_capability(
         &mut self,
-        _: &Connection,
+        conn: &Connection,
         qh: &QueueHandle<Self>,
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            match self.seats.get_pointer(qh, &seat) {
-                Ok(pointer) => {
-                    self.relative_pointer =
-                        Some(self.relative_manager.get_relative_pointer(&pointer, qh, ()));
-                    self.pointer = Some(pointer);
+        if capability == Capability::Pointer && self.themed_pointer.is_none() {
+            let surface = self.compositor.create_surface(qh);
+            match self.seats.get_pointer_with_theme(
+                qh,
+                &seat,
+                self.shm.wl_shm(),
+                surface,
+                ThemeSpec::default(),
+            ) {
+                Ok(themed_pointer) => {
+                    self.relative_pointer = Some(self.relative_manager.get_relative_pointer(
+                        themed_pointer.pointer(),
+                        qh,
+                        (),
+                    ));
+                    self.themed_pointer = Some(themed_pointer);
+                    self.update_cursor(conn);
                 }
-                Err(error) => eprintln!("hyprkey: pointer unavailable: {error}"),
+                Err(error) => eprintln!("hyprkey: themed pointer unavailable: {error}"),
             }
         }
     }
@@ -434,9 +480,11 @@ impl SeatHandler for App {
                 self.model.save();
                 self.dirty = true;
             }
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
+            if let Some(themed_pointer) = self.themed_pointer.take() {
+                themed_pointer.pointer().release();
             }
+            self.current_cursor = None;
+            self.pointer_position = None;
             self.drag = None;
         }
     }
@@ -445,7 +493,7 @@ impl SeatHandler for App {
 impl PointerHandler for App {
     fn pointer_frame(
         &mut self,
-        _: &Connection,
+        conn: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_pointer::WlPointer,
         events: &[PointerEvent],
@@ -456,9 +504,25 @@ impl PointerHandler for App {
             }
             let (x, y) = event.position;
             match event.kind {
+                PointerEventKind::Enter { .. } => {
+                    self.pointer_position = Some((x, y));
+                    self.current_cursor = None;
+                    self.update_cursor(conn);
+                }
+                PointerEventKind::Leave { .. } => {
+                    if self.drag.is_none() {
+                        self.pointer_position = None;
+                        self.current_cursor = None;
+                    }
+                }
+                PointerEventKind::Motion { .. } => {
+                    self.pointer_position = Some((x, y));
+                    self.update_cursor(conn);
+                }
                 PointerEventKind::Press {
                     button: BTN_LEFT, ..
                 } => {
+                    self.pointer_position = Some((x, y));
                     if let Some(hit) = self
                         .hits
                         .iter()
@@ -474,16 +538,28 @@ impl PointerHandler for App {
                         self.drag = Some(drag);
                         self.last_frame = Instant::now();
                     }
+                    self.update_cursor(conn);
                 }
-                // Absolute motion also changes when the surface moves. Ignore it
-                // for dragging; relative_pointer supplies actual pointer deltas.
+                PointerEventKind::Press {
+                    button: BTN_RIGHT, ..
+                } => {
+                    self.pointer_position = Some((x, y));
+                    if self.drag.is_none() {
+                        self.action(Action::Settings);
+                    }
+                    self.update_cursor(conn);
+                }
                 PointerEventKind::Release {
                     button: BTN_LEFT, ..
-                } if self.drag.take().is_some() => {
-                    self.frame_pending = false;
-                    self.position_dirty = true;
-                    self.model.save();
-                    self.dirty = true;
+                } => {
+                    self.pointer_position = Some((x, y));
+                    if self.drag.take().is_some() {
+                        self.frame_pending = false;
+                        self.position_dirty = true;
+                        self.model.save();
+                        self.dirty = true;
+                    }
+                    self.update_cursor(conn);
                 }
                 _ => {}
             }

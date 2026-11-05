@@ -14,7 +14,7 @@ A lightweight, zero-dependency keystroke HUD for **Wayland & Hyprland**, built w
 - **Repeat Counter**: Consecutive key presses and held auto-repeats show as counters (e.g. `×3`).
 - **Modifier Display**: Highlights `⇧` Shift, `⌃` Ctrl, `⌥` Alt, and `⌘` Super while held.
 - **Smart Caps Lock**: Syncs directly with Hyprland to respect custom XKB remaps (such as `caps:escape_shifted_capslock`).
-- **Customizable**: Built-in settings menu (`...`) for HUD scaling (50–200%), font size, history length, auto-hide, and timeout.
+- **Customizable**: Built-in settings menu (expand via right-click) for HUD scaling (50–200%), font size, history length, auto-hide, and timeout.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ cargo build --release --locked
 
 ## Configuration
 
-Settings are saved automatically to `~/.config/hyprkey/settings.json`. Click the **`...`** button on the HUD to adjust settings in real-time.
+Settings are saved automatically to `~/.config/hyprkey/settings.json`. Right-click on the HUD to adjust settings in real-time.
 
 ## Development
 
